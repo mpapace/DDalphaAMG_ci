@@ -1,0 +1,833 @@
+/*
+ * Copyright (C) 2016, Matthias Rottmann, Artur Strebel, Simon Heybrock, Simone Bacchio, Bjoern Leder.
+ * 
+ * This file is part of the DDalphaAMG solver library.
+ * 
+ * The DDalphaAMG solver library is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ * 
+ * The DDalphaAMG solver library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with the DDalphaAMG solver library. If not, see http://www.gnu.org/licenses/.
+ * 
+ */
+
+#include "main.h"
+
+#ifdef COARSE_SCALAP
+void blacs_gridexit_( lapack_int* );
+#endif
+
+void inv_iter_2lvl_extension_setup_PRECISION( int setup_iter, level_struct *l, struct Thread *threading );
+void inv_iter_inv_fcycle_PRECISION( int setup_iter, level_struct *l, struct Thread *threading );
+void testvector_analysis_PRECISION( vector_PRECISION *test_vectors, level_struct *l, struct Thread *threading );
+void read_tv_from_file_PRECISION( level_struct *l, struct Thread *threading );
+
+void coarse_grid_correction_PRECISION_setup( level_struct *l, struct Thread *threading ) {
+  
+  if ( !l->idle ) {
+    
+    START_LOCKED_MASTER(threading)
+    coarse_operator_PRECISION_alloc( l );
+#ifndef INTERPOLATION_SETUP_LAYOUT_OPTIMIZED_PRECISION
+    coarse_operator_PRECISION_setup( l->is_PRECISION.interpolation, l );
+    END_LOCKED_MASTER(threading)
+#else
+    END_LOCKED_MASTER(threading)
+    coarse_operator_PRECISION_setup_vectorized( l->is_PRECISION.operator, l, threading );
+#endif
+    
+    START_LOCKED_MASTER(threading)
+    if ( !l->next_level->idle ) {
+      if ( l->next_level->level > 0 ) {
+        schwarz_PRECISION_alloc( &(l->next_level->s_PRECISION), l->next_level );
+        schwarz_layout_PRECISION_define( &(l->next_level->s_PRECISION), l->next_level );
+      } else {
+        operator_PRECISION_alloc( &(l->next_level->s_PRECISION.op), _ORDINARY, l->next_level );
+        operator_PRECISION_define( &(l->next_level->s_PRECISION.op), l->next_level );
+        interpolation_PRECISION_alloc( l->next_level );
+      }
+    } else {
+      interpolation_PRECISION_dummy_alloc( l->next_level );
+    }
+    conf_PRECISION_gather( &(l->next_level->s_PRECISION.op), &(l->next_level->op_PRECISION), l->next_level );
+    
+    END_LOCKED_MASTER(threading)
+    
+    if ( !l->next_level->idle && l->next_level->level > 0 ) {
+      START_LOCKED_MASTER(threading)
+      schwarz_PRECISION_boundary_update( &(l->next_level->s_PRECISION), l->next_level );
+      END_LOCKED_MASTER(threading)
+      if ( g.method >= 4 && g.odd_even ) {
+        START_LOCKED_MASTER(threading)
+        coarse_oddeven_alloc_PRECISION( l->next_level );
+        END_LOCKED_MASTER(threading)
+        coarse_oddeven_setup_PRECISION( &(l->next_level->s_PRECISION.op), _REORDER, l->next_level, threading );
+      }
+      coarse_operator_PRECISION_set_couplings( &(l->next_level->s_PRECISION.op), l->next_level, threading );
+      START_LOCKED_MASTER(threading)
+      l->next_level->p_PRECISION.op = &(l->next_level->s_PRECISION.op);
+//#ifdef BLOCK_JACOBI
+#if 0
+      if ( l->next_level->level==0 ) l->next_level->p_PRECISION.block_jacobi_PRECISION.local_p.op = &(l->next_level->s_PRECISION.op);
+#endif
+      END_LOCKED_MASTER(threading)
+    }
+    if ( !l->next_level->idle && l->next_level->level == 0 && g.odd_even ) {
+      START_LOCKED_MASTER(threading)
+      coarse_oddeven_alloc_PRECISION( l->next_level );
+      END_LOCKED_MASTER(threading)
+      coarse_oddeven_setup_PRECISION( &(l->next_level->s_PRECISION.op), _NO_REORDERING, l->next_level, threading );
+    } else if ( !l->next_level->idle && l->next_level->level == 0 ) {
+      coarse_operator_PRECISION_set_couplings( &(l->next_level->s_PRECISION.op), l->next_level, threading );
+    }
+  }
+
+  if ( l->next_level->level > 0 ) {
+    next_level_setup( NULL, l->next_level, threading );
+    START_LOCKED_MASTER(threading)
+    if ( !l->next_level->idle )
+      interpolation_PRECISION_alloc( l->next_level );
+    END_LOCKED_MASTER(threading)
+    SYNC_HYPERTHREADS(threading)
+    if ( !l->idle ) {
+      for ( int i=0; i<MIN(l->next_level->num_eig_vect,l->num_eig_vect); i++ ) {
+        restrict_PRECISION( l->next_level->is_PRECISION.test_vector[i], l->is_PRECISION.test_vector[i], l, threading );
+      }
+      START_LOCKED_MASTER(threading)
+      for ( int i=MIN(l->next_level->num_eig_vect,l->num_eig_vect); i<l->next_level->num_eig_vect; i++ ) {
+        if ( !l->next_level->idle )
+          vector_PRECISION_define_random( l->next_level->is_PRECISION.test_vector[i], 0,
+                                          l->next_level->inner_vector_size, l->next_level );
+      }
+      END_LOCKED_MASTER(threading)
+    }
+    if ( !l->next_level->idle )
+      interpolation_PRECISION_define( NULL, l->next_level, threading );
+    coarse_grid_correction_PRECISION_setup( l->next_level, threading );
+  }
+}
+
+
+void iterative_PRECISION_setup( int setup_iter, level_struct *l, struct Thread *threading ) {
+  if ( l->depth == 0 ) {
+    switch ( g.interpolation ) {
+      case 2: inv_iter_inv_fcycle_PRECISION( setup_iter, l, threading ); break;
+      case 3: inv_iter_inv_fcycle_PRECISION( setup_iter, l, threading ); break;
+      case 4: read_tv_from_file_PRECISION( l, threading ); break;
+      default: inv_iter_2lvl_extension_setup_PRECISION( setup_iter, l, threading ); break;
+    }
+  }
+
+  level_struct *lp = l;
+  while( lp->level > 0 ) {
+    testvector_analysis_PRECISION( lp->is_PRECISION.test_vector, lp, threading );
+    lp = lp->next_level;
+    if ( lp == NULL )
+      break;
+  }
+}
+
+
+void read_tv_from_file_PRECISION( level_struct *l, struct Thread *threading ) {
+  
+  if ( l->depth == 0 ) {
+    if ( g.tv_io_single_file ) {
+      START_LOCKED_MASTER(threading)
+      vector_io_single_file( NULL, NULL, g.tv_io_file_name, _READ, l->num_eig_vect, "test vectors", l );
+      END_LOCKED_MASTER(threading)
+      re_setup_PRECISION( l, threading );
+    } else {
+      START_LOCKED_MASTER(threading)
+
+      int n = l->num_eig_vect, i;
+      char filename[STRINGLENGTH+20];
+      vector_double tmp = NULL;
+      
+      MALLOC( tmp, complex_double, l->inner_vector_size );
+      
+      for ( i=0; i<n; i++ ) {
+        sprintf( filename, "%s.%02d", g.tv_io_file_name, i );
+        printf0("%s.%02d\n", g.tv_io_file_name, i );
+        vector_io( (double*)tmp, filename, _READ, l );
+        trans_PRECISION( l->is_PRECISION.test_vector[i], tmp, l->s_PRECISION.op.translation_table, l, no_threading );
+      }
+      
+      FREE( tmp, complex_double, l->inner_vector_size );
+
+      END_LOCKED_MASTER(threading)
+
+      re_setup_PRECISION( l, threading );
+    }
+  }
+}
+
+
+void coarse_grid_correction_PRECISION_free( level_struct *l ) {
+  
+  next_level_free( l->next_level );
+  
+  if ( !l->idle ) {
+    if ( !l->next_level->idle ) {
+      if ( l->next_level->level > 0 ) {
+        schwarz_PRECISION_free( &(l->next_level->s_PRECISION), l->next_level );
+        if ( g.method >= 4 && g.odd_even ) {
+          coarse_oddeven_free_PRECISION( l->next_level );
+        }
+      } else {
+        operator_PRECISION_free( &(l->next_level->s_PRECISION.op), _ORDINARY, l->next_level );
+        interpolation_PRECISION_free( l->next_level );
+        if ( g.odd_even )
+          coarse_oddeven_free_PRECISION( l->next_level );
+      }
+    } else {
+      interpolation_PRECISION_dummy_free( l->next_level );
+    }
+    interpolation_PRECISION_free( l );
+    coarse_operator_PRECISION_free( l );
+  }  
+}
+
+
+void interpolation_PRECISION_define( vector_double *V, level_struct *l, struct Thread *threading ) {
+
+  int k, i, n = l->num_eig_vect,
+    pc = 0;
+#ifdef DEBUG
+  int pi = 1, pn = n*6;
+#endif
+  vector_PRECISION *buffer = NULL;
+  int start = threading->start_index[l->depth];
+  int end   = threading->end_index[l->depth];
+    
+  if ( V == NULL ) {
+    
+    PUBLIC_MALLOC( buffer, complex_PRECISION*, 3 );
+    START_MASTER(threading)
+    buffer[0] = NULL;
+    END_MASTER(threading)
+    PUBLIC_MALLOC( buffer[0], complex_PRECISION, l->vector_size*3 );
+    
+    START_MASTER(threading)
+    for( i=1; i<3; i++)
+      buffer[i] = buffer[0] + l->vector_size*i;
+    if ( g.print > 0 ) printf0("initial definition --- depth: %d\n", l->depth );
+#ifdef DEBUG
+    if ( g.print > 0 ) { printf0("\033[0;42m\033[1;37m|"); fflush(0); }
+#endif
+    END_MASTER(threading)
+    
+
+    for ( k=0; k<n; k++ ) {
+//       if ( l->depth == 0 ) {
+        START_LOCKED_MASTER(threading)
+        vector_PRECISION_define_random( l->is_PRECISION.test_vector[k], 0, l->inner_vector_size, l );
+        END_LOCKED_MASTER(threading)
+//       }
+      
+      smoother_PRECISION( buffer[0], NULL, l->is_PRECISION.test_vector[k], 1, _NO_RES, l, threading );
+      vector_PRECISION_copy( l->is_PRECISION.test_vector[k], buffer[0], start, end, l );
+      smoother_PRECISION( buffer[0], NULL, l->is_PRECISION.test_vector[k], g.method>=4?1:2, _NO_RES, l, threading );
+      vector_PRECISION_copy( l->is_PRECISION.test_vector[k], buffer[0], start, end, l );
+      smoother_PRECISION( buffer[0], NULL, l->is_PRECISION.test_vector[k], g.method>=4?1:3, _NO_RES, l, threading );
+      vector_PRECISION_copy( l->is_PRECISION.test_vector[k], buffer[0], start, end, l );
+        
+      pc += 6;
+#ifdef DEBUG
+      START_MASTER(threading)
+      if ( pc >= 0.2*pi*pn ) { if ( g.print > 0 ) printf0("%4d%% |", 20*pi); if ( g.my_rank == 0 ) fflush(0); pi++; }
+      END_MASTER(threading)
+#endif
+    }
+    
+    PUBLIC_FREE( buffer[0], complex_PRECISION, l->vector_size*3 );
+    PUBLIC_FREE( buffer, complex_PRECISION*, 3 );
+    
+    for ( k=0; k<n; k++ ) {
+      vector_PRECISION_real_scale( l->is_PRECISION.test_vector[k], l->is_PRECISION.test_vector[k],
+                                  1.0/global_norm_PRECISION( l->is_PRECISION.test_vector[k], 0, l->inner_vector_size, l, threading ),
+                                  start, end, l );
+    }
+    
+#ifdef DEBUG
+    START_MASTER(threading)
+    if ( g.print > 0 ) printf0("\033[0m\n");
+    END_MASTER(threading)
+#endif
+    
+    } else {
+    for ( i=0; i<n; i++ ) {
+      trans_PRECISION( l->is_PRECISION.test_vector[i], V[i], l->s_PRECISION.op.translation_table, l, threading );
+    }
+  }
+
+#ifndef INTERPOLATION_SETUP_LAYOUT_OPTIMIZED_PRECISION
+  for ( k=0; k<n; k++ ) {
+    vector_PRECISION_copy( l->is_PRECISION.interpolation[k], l->is_PRECISION.test_vector[k], start, end, l );
+  }
+#endif
+  
+  
+    
+  testvector_analysis_PRECISION( l->is_PRECISION.test_vector, l, threading );
+
+#ifdef INTERPOLATION_SETUP_LAYOUT_OPTIMIZED_PRECISION
+  define_interpolation_PRECISION_operator( l->is_PRECISION.test_vector, l, threading );  
+  gram_schmidt_on_aggregates_PRECISION_vectorized( l->is_PRECISION.operator, n, l, threading );
+#else
+  gram_schmidt_on_aggregates_PRECISION( l->is_PRECISION.interpolation, n, l, threading );
+  define_interpolation_PRECISION_operator( l->is_PRECISION.interpolation, l, threading );
+#endif
+  
+}
+
+
+void re_setup_PRECISION( level_struct *l, struct Thread *threading ) {
+  
+  if ( l->level > 0 ) {
+    if ( !l->idle ) {
+#ifdef INTERPOLATION_SETUP_LAYOUT_OPTIMIZED_PRECISION
+      define_interpolation_PRECISION_operator( l->is_PRECISION.test_vector, l, threading );
+      gram_schmidt_on_aggregates_PRECISION_vectorized( l->is_PRECISION.operator, l->num_eig_vect, l, threading );
+      if ( l->depth > 0 )
+        gram_schmidt_on_aggregates_PRECISION_vectorized( l->is_PRECISION.operator, l->num_eig_vect, l, threading );
+      coarse_operator_PRECISION_setup_vectorized( l->is_PRECISION.operator, l, threading );
+      START_LOCKED_MASTER(threading)
+#else
+      for ( int i=0; i<l->num_eig_vect; i++ ) {
+        vector_PRECISION_copy( l->is_PRECISION.interpolation[i], l->is_PRECISION.test_vector[i],
+                               threading->start_index[l->depth], threading->end_index[l->depth], l );
+      }
+      gram_schmidt_on_aggregates_PRECISION( l->is_PRECISION.interpolation, l->num_eig_vect, l, threading );
+      if ( l->depth > 0 )
+        gram_schmidt_on_aggregates_PRECISION( l->is_PRECISION.interpolation, l->num_eig_vect, l, threading );
+      define_interpolation_PRECISION_operator( l->is_PRECISION.interpolation, l, threading );
+      START_LOCKED_MASTER(threading)
+      coarse_operator_PRECISION_setup( l->is_PRECISION.interpolation, l );
+#endif
+      conf_PRECISION_gather( &(l->next_level->s_PRECISION.op), &(l->next_level->op_PRECISION), l->next_level );
+      END_LOCKED_MASTER(threading)
+      if ( !l->next_level->idle && l->next_level->level > 0 ) {
+        START_LOCKED_MASTER(threading)
+        schwarz_PRECISION_boundary_update( &(l->next_level->s_PRECISION), l->next_level );
+        END_LOCKED_MASTER(threading)
+        if ( g.method >= 4 && g.odd_even ) {
+          coarse_oddeven_setup_PRECISION( &(l->next_level->s_PRECISION.op), _REORDER, l->next_level, threading );
+        } else {
+          coarse_operator_PRECISION_set_couplings( &(l->next_level->s_PRECISION.op), l->next_level, threading );
+        }
+      }
+      if ( !l->next_level->idle && l->next_level->level == 0 && g.odd_even ) {
+        coarse_oddeven_setup_PRECISION( &(l->next_level->s_PRECISION.op), _NO_REORDERING, l->next_level, threading );
+      } else if ( !l->next_level->idle && l->next_level->level == 0 ) {
+        coarse_operator_PRECISION_set_couplings( &(l->next_level->s_PRECISION.op), l->next_level, threading );
+      }
+      re_setup_PRECISION( l->next_level, threading );
+    }
+  }
+//#if defined(POLYPREC) || defined(GCRODR) || defined(BLOCK_JACOBI) || defined(MUMPS_ADDS) || defined(COARSE_SCALAP)
+#if defined(POLYPREC) || defined(GCRODR) || defined(MUMPS_ADDS) || defined(COARSE_SCALAP)
+
+  else {
+
+    SYNC_MASTER_TO_ALL(threading)
+    SYNC_CORES(threading)
+
+    START_MASTER(threading)
+
+    // this runs on level 0 only
+#ifdef POLYPREC
+    l->p_PRECISION.polyprec_PRECISION.update_lejas = 1;
+    l->p_PRECISION.polyprec_PRECISION.preconditioner = NULL;
+#endif
+#ifdef GCRODR
+    l->p_PRECISION.gcrodr_PRECISION.update_CU = 1;
+    l->p_PRECISION.gcrodr_PRECISION.upd_ctr = 0;
+    l->p_PRECISION.gcrodr_PRECISION.CU_usable = 0;
+#endif
+//#ifdef BLOCK_JACOBI
+#if 0
+    l->p_PRECISION.block_jacobi_PRECISION.local_p.polyprec_PRECISION.update_lejas = 1;
+    l->p_PRECISION.block_jacobi_PRECISION.BJ_usable = 0;
+#endif
+
+    //printf0("RESET OF FLAGS FOR : BJ, POLYPREC AND GCRO-DR ***\n");
+    coarsest_level_resets_PRECISION( l, threading );
+
+    END_MASTER(threading)
+
+    SYNC_MASTER_TO_ALL(threading)
+    SYNC_CORES(threading)
+
+#if defined(MUMPS_ADDS) || defined(COARSE_SCALAP)
+    //only do this during solve, no direct solves during setup phase, due to too many inversion during setup
+    if (g.on_solve){
+		// setting up mumps data formatting
+	double t0,t1;
+	if (!l->idle){
+		mumps_setup_PRECISION(l, threading);	//setup vals, Is, Js
+// (timing of) factorization
+		START_MASTER(threading)
+		t0 = MPI_Wtime();
+		g.coarsest_fact_time -= MPI_Wtime();
+#ifdef MUMPS_ADDS   //find LU with mumps
+		g.mumps_id.job = 2;	//factorize
+		// call to factorize
+		cmumps_c(&(g.mumps_id));
+#else	//find inverse with scalapack
+        }
+	coarse_scalap_factorize_PRECISION( l, g.ds->dense_vals2d,
+			    g.ds->desc_dense_vals2d, g.ds->ipiv, threading);
+	if (!l->idle){
+#endif
+		t1 = MPI_Wtime();
+		g.coarsest_fact_time += MPI_Wtime();
+#ifndef COARSE_SCALAP
+		printf0("MUMPS factorize time (seconds) : %f\n",t1-t0);
+#else
+		printf0("Scalapack factorize time (seconds) : %f\n",t1-t0);
+#endif
+		END_MASTER(threading)
+		SYNC_CORES(threading)
+	}
+    }
+#endif
+  }
+#endif
+}
+
+
+void inv_iter_2lvl_extension_setup_PRECISION( int setup_iter, level_struct *l, struct Thread *threading ) {
+
+  printf0( "-----------------------------------------------WITHIN !!!\n" );
+
+  if ( !l->idle ) {
+    vector_PRECISION buf1 = NULL;
+    gmres_PRECISION_struct gmres;
+    
+    // TODO: bugfix - threading, etc
+    
+    START_LOCKED_MASTER(threading)
+    MALLOC( buf1, complex_PRECISION, l->vector_size );
+    fgmres_PRECISION_struct_init( &gmres );
+    fgmres_PRECISION_struct_alloc( g.coarse_iter, g.coarse_restart, l->next_level->vector_size, g.coarse_tol, 
+                                   _COARSE_GMRES, _NOTHING, NULL, apply_coarse_operator_PRECISION, &gmres, l->next_level );
+    
+    if ( g.odd_even && l->next_level->level == 0 ){
+      gmres.v_end = l->next_level->oe_op_PRECISION.num_even_sites*l->next_level->num_lattice_site_var;
+      //printf0("FIXME ASAP !\n");
+    }
+    END_LOCKED_MASTER(threading)
+    
+    for ( int k=0; k<setup_iter; k++ ) {
+      int pc = 0;
+#ifdef DEBUG
+      int pi = 1, pn = l->num_eig_vect*l->post_smooth_iter;
+#endif
+      START_MASTER(threading)
+      printf0("depth: %d, 2lvl correction step number %d...\n", l->depth, k+1 ); 
+#ifdef DEBUG
+      printf0("\033[0;42m\033[1;37m|"); fflush(0); 
+#endif
+      END_MASTER(threading)
+      for ( int i=0; i<l->num_eig_vect; i++ ) {
+        restrict_PRECISION( gmres.b, l->is_PRECISION.test_vector[i], l, threading );
+        if ( !l->next_level->idle ) {
+          if ( g.odd_even && l->next_level->level == 0 ) {
+            coarse_solve_odd_even_PRECISION( &gmres, &(l->next_level->oe_op_PRECISION), l->next_level, threading );
+          } else {
+            fgmres_PRECISION( &gmres, l->next_level, threading );
+          }
+        }
+        interpolate3_PRECISION( buf1, gmres.x, l, threading );
+        smoother_PRECISION( buf1, NULL, l->is_PRECISION.test_vector[i], l->post_smooth_iter, _RES, l, threading );
+        vector_PRECISION_real_scale( l->is_PRECISION.test_vector[i], buf1,
+                                     1.0/global_norm_PRECISION( buf1, 0, l->inner_vector_size, l, threading ),
+                                     threading->start_index[l->depth], threading->end_index[l->depth], l );
+        pc += l->post_smooth_iter;
+#ifdef DEBUG
+        START_MASTER(threading)
+        if ( pc >= 0.2*pi*pn ) { printf0("%4d%% |", 20*pi); fflush(0); pi++; }
+        END_MASTER(threading)
+#endif
+      }
+#ifdef DEBUG
+      START_MASTER(threading)
+      printf0("\033[0m\n");
+      END_MASTER(threading)
+#endif
+
+#ifdef INTERPOLATION_SETUP_LAYOUT_OPTIMIZED_PRECISION
+      define_interpolation_PRECISION_operator( l->is_PRECISION.test_vector, l, threading );
+      gram_schmidt_on_aggregates_PRECISION_vectorized( l->is_PRECISION.operator, l->num_eig_vect, l, threading );
+      if ( l->depth > 0 )
+        gram_schmidt_on_aggregates_PRECISION_vectorized( l->is_PRECISION.operator, l->num_eig_vect, l, threading );
+      coarse_operator_PRECISION_setup_vectorized( l->is_PRECISION.operator, l, threading );
+      START_LOCKED_MASTER(threading)
+#else
+      for ( int i=0; i<l->num_eig_vect; i++ )
+        vector_PRECISION_copy( l->is_PRECISION.interpolation[i], l->is_PRECISION.test_vector[i],
+            threading->start_index[l->depth], threading->end_index[l->depth], l );
+      gram_schmidt_on_aggregates_PRECISION( l->is_PRECISION.interpolation, l->num_eig_vect, l, threading );
+      if ( l->depth > 0 )
+        gram_schmidt_on_aggregates_PRECISION( l->is_PRECISION.interpolation, l->num_eig_vect, l, threading );
+      define_interpolation_PRECISION_operator( l->is_PRECISION.interpolation, l, threading );
+      START_LOCKED_MASTER(threading)
+      coarse_operator_PRECISION_setup( l->is_PRECISION.interpolation, l );
+#endif
+      conf_PRECISION_gather( &(l->next_level->s_PRECISION.op), &(l->next_level->op_PRECISION), l->next_level );
+      END_LOCKED_MASTER(threading)
+      if ( !l->next_level->idle && l->next_level->level > 0 ) {
+        START_LOCKED_MASTER(threading)
+        schwarz_PRECISION_boundary_update( &(l->next_level->s_PRECISION), l->next_level );
+        END_LOCKED_MASTER(threading)
+        if ( g.method >= 4 && g.odd_even ) {
+          coarse_oddeven_setup_PRECISION( &(l->next_level->s_PRECISION.op), _REORDER, l->next_level, threading );
+        } else {
+          coarse_operator_PRECISION_set_couplings( &(l->next_level->s_PRECISION.op), l->next_level, threading );
+        }
+      }
+      if ( !l->next_level->idle && l->next_level->level == 0 && g.odd_even ) {
+        coarse_oddeven_setup_PRECISION( &(l->next_level->s_PRECISION.op), _NO_REORDERING, l->next_level, threading );
+      } else if ( !l->next_level->idle && l->next_level->level == 0 ) {
+        coarse_operator_PRECISION_set_couplings( &(l->next_level->s_PRECISION.op), l->next_level, threading );
+      }
+    }
+    
+    if ( l->level > 1 )
+      inv_iter_2lvl_extension_setup_PRECISION( setup_iter, l->next_level, threading );
+
+    START_LOCKED_MASTER(threading)
+    FREE( buf1, complex_PRECISION, l->vector_size );
+    fgmres_PRECISION_struct_free( &gmres, l );
+    END_LOCKED_MASTER(threading)
+  }
+}
+
+
+void set_kcycle_tol_PRECISION( PRECISION tol, level_struct *l ) {
+  
+  if ( !l->idle ){
+    l->p_PRECISION.tol = tol;
+//#ifdef BLOCK_JACOBI
+#if 0
+    if ( l->level==0 ) l->p_PRECISION.block_jacobi_PRECISION.local_p.tol = tol;
+#endif
+  }
+  
+  if ( l->level > 1 )
+    set_kcycle_tol_PRECISION( tol, l->next_level );
+}
+
+
+void test_vector_PRECISION_update( int i, level_struct *l, struct Thread *threading ) {
+  
+  if ( l->level > 1 )
+    test_vector_PRECISION_update( i, l->next_level, threading );
+
+  if ( !l->idle && i<l->num_eig_vect )
+    vector_PRECISION_real_scale( l->is_PRECISION.test_vector[i], l->p_PRECISION.x,
+                                 1.0/global_norm_PRECISION( l->p_PRECISION.x, 0, l->inner_vector_size, l, threading ),
+                                 threading->start_index[l->depth], threading->end_index[l->depth], l );
+}
+
+
+void inv_iter_inv_fcycle_PRECISION( int setup_iter, level_struct *l, struct Thread *threading ) {
+  
+  vector_PRECISION v_buf = NULL;
+  complex_PRECISION *buffer = NULL;
+  
+  PUBLIC_MALLOC( buffer, complex_PRECISION, 2*l->num_eig_vect );
+      
+  START_LOCKED_MASTER(threading)
+  if ( l->depth == 0 )
+    set_kcycle_tol_PRECISION( g.coarse_tol, l );
+  END_LOCKED_MASTER(threading)
+  SYNC_MASTER_TO_ALL(threading)
+  
+  PUBLIC_MALLOC( v_buf, complex_PRECISION, l->vector_size );
+  
+  if ( !l->idle ) {
+    for ( int j=0; j<setup_iter; j++ ) {      
+
+      /*
+      // dynamically setting the degree of the polynomial at the coarsest level
+      {
+        g.setup_phase_ctr = j;
+
+        double y1 = g.polyprec_d;
+        double y0 = 2;
+        double x1 = (double)(setup_iter-1);
+        double x0 = 0;
+
+        double slope = (y1-y0)/(x1-x0);
+
+        double xj = (double)(j);
+        double yj = y0 + (xj-x0)*slope;
+
+        g.polyprec_d_setup = (int)(yj);
+
+        //if ( j<2 ) {  }
+        //else {}
+
+        level_struct *lx = l;
+        while (1) {
+          if ( lx->level==0 ) {
+            if ( g.mixed_precision==0 ) {
+              lx->p_double.polyprec_double.d_poly = g.polyprec_d_setup;
+            }
+            else {
+              lx->p_float.polyprec_float.d_poly = g.polyprec_d_setup;
+            }
+            break;
+          }
+          else { lx = lx->next_level; }
+        }
+
+        printf0("DEGREE = %d\n", lx->p_float.polyprec_float.d_poly);
+      }
+      */
+
+      int pc = 0;
+#ifdef DEBUG
+      int pi = 1, pn = l->num_eig_vect*l->post_smooth_iter;
+#endif
+      
+      START_LOCKED_MASTER(threading)
+      if ( g.print > 0 ) printf0("depth: %d, bootstrap step number %d...\n", l->depth, j+1 );
+#ifdef DEBUG
+      if ( g.print > 0 ) { printf0("\033[0;42m\033[1;37m|"); if ( g.my_rank == 0 ) fflush(0); }
+#endif
+      END_LOCKED_MASTER(threading)
+      
+      gram_schmidt_PRECISION( l->is_PRECISION.test_vector, buffer, 0, l->num_eig_vect, l, threading );
+      
+      for ( int i=0; i<l->num_eig_vect; i++ ) {
+        vcycle_PRECISION( l->p_PRECISION.x, NULL, l->is_PRECISION.test_vector[i], _NO_RES, l, threading );
+        
+        test_vector_PRECISION_update( i, l, threading );
+        
+        pc += l->post_smooth_iter;
+#ifdef DEBUG
+        START_MASTER(threading)
+        if ( pc >= (int)((0.2*pi)*pn) ) { if ( g.print > 0 ) { printf0("%4d%% |", 20*pi); if ( g.my_rank == 0 ) fflush(0); } pi++; }
+        END_MASTER(threading)
+#endif
+      }
+
+#ifdef DEBUG
+      START_MASTER(threading)
+      if ( g.print > 0 ) printf0("\033[0m\n");
+      END_MASTER(threading)
+#endif      
+      re_setup_PRECISION( l, threading );
+      
+      if ( l->depth == 0 && l->next_level->level > 0 ) {
+        inv_iter_inv_fcycle_PRECISION( MAX(1,round( ((double)(j+1)*l->next_level->setup_iter)/
+        ((double)setup_iter) )), l->next_level, threading );
+      }
+    }
+    if ( l->depth > 0 && l->next_level->level > 0 ) {
+      inv_iter_inv_fcycle_PRECISION( MAX(1, round((double)(l->next_level->setup_iter*setup_iter)/
+      ((double)l->setup_iter))), l->next_level, threading );
+    }
+  }
+  
+  PUBLIC_FREE( v_buf, complex_PRECISION, l->vector_size );
+  PUBLIC_FREE( buffer, complex_PRECISION, 2*l->num_eig_vect );
+  
+  if ( l->depth == 0 ) {
+    START_LOCKED_MASTER(threading)
+    set_kcycle_tol_PRECISION( g.kcycle_tol, l );
+    END_LOCKED_MASTER(threading)
+  }
+}
+
+
+void testvector_analysis_PRECISION( vector_PRECISION *test_vectors, level_struct *l, struct Thread *threading ) {
+#ifdef TESTVECTOR_ANALYSIS
+  START_UNTHREADED_FUNCTION(threading)
+  if ( l->depth == 0 ) {
+    
+  complex_PRECISION lambda;
+  PRECISION mu;
+  printf0("--------------------------------------- depth: %d ----------------------------------------\n", l->depth );
+  for ( int i=0; i<l->num_eig_vect; i++ ) {
+    printf0("vector #%02d: ", i+1 );
+    apply_operator_PRECISION( l->vbuf_PRECISION[3], test_vectors[i], &(l->p_PRECISION), l, no_threading );
+    coarse_gamma5_PRECISION( l->vbuf_PRECISION[0], l->vbuf_PRECISION[3], 0, l->inner_vector_size, l );
+    lambda = global_inner_product_PRECISION( test_vectors[i], l->vbuf_PRECISION[0], 0, l->inner_vector_size, l, no_threading );
+    lambda /= global_inner_product_PRECISION( test_vectors[i], test_vectors[i], 0, l->inner_vector_size, l, no_threading );
+    vector_PRECISION_saxpy( l->vbuf_PRECISION[1], l->vbuf_PRECISION[0], test_vectors[i], -lambda, 0, l->inner_vector_size, l );
+    mu = global_norm_PRECISION( l->vbuf_PRECISION[1], 0, l->inner_vector_size, l, no_threading )/global_norm_PRECISION( test_vectors[i], 0, l->inner_vector_size, l, no_threading );
+    printf0("singular value: %+lf%+lfi, singular vector precision: %le\n", (double)creal(lambda), (double)cimag(lambda), (double)mu );
+  }
+  printf0("--------------------------------------- depth: %d ----------------------------------------\n", l->depth );
+  
+  }
+  END_UNTHREADED_FUNCTION(threading)
+#endif
+}
+
+
+#if defined(MUMPS_ADDS) || defined(COARSE_SCALAP)
+void direct_solver_PRECISION_setup(level_struct *l){
+//allocate memory for direct solver on coarsest level
+
+    // Allocate memory for cmumps data format
+    lapack_int site_var = l->num_lattice_site_var;
+    lapack_int nr_nodes = l->num_inner_lattice_sites;
+    if (!l->idle){
+	MALLOC( g.ds->mumps_vals, complex_PRECISION, SQUARE(site_var)*nr_nodes * 9);
+	MALLOC( g.ds->mumps_Is, int, SQUARE(site_var)*nr_nodes * 9); // nr. of el per node * nr. of nodes * 9 	//9 = self + T+ + T- + Z+ + Z- + Y+ ...
+	MALLOC( g.ds->mumps_Js, int, SQUARE(site_var)*nr_nodes * 9);
+
+	// initializing with 0s
+	memset(g.ds->mumps_Is, 0, SQUARE(site_var)*nr_nodes * 9 * sizeof(int));
+	memset(g.ds->mumps_Js, 0, SQUARE(site_var)*nr_nodes * 9 * sizeof(int));
+	memset(g.ds->mumps_vals, 0, SQUARE(site_var)*nr_nodes * 9 * sizeof(complex_PRECISION));
+    }
+    lapack_int mumps_n = site_var * nr_nodes * l->num_processes;	//order of Matrix
+//    int nnz = SQUARE(site_var) * nr_nodes *9 * l->num_processes;	//number of nonzero elements
+//    int nnz_loc = SQUARE(site_var) * nr_nodes *9;
+
+    // Allocating and initializing SOLUTION
+    // will be used only by one process/ p0
+  /*  	MPI_Barrier(MPI_COMM_WORLD);
+	printf0("CHECKPOINT 0\n"); fflush(stdout);
+*/	
+#ifdef MUMS_ADDS
+    if (g.my_rank == 0){
+      MALLOC(g.ds->mumps_SOL, complex_PRECISION, mumps_n);
+      memset(g.ds->mumps_SOL, 0, mumps_n * sizeof(complex_PRECISION));
+    }
+
+    if (!l->idle){
+	int rhs_len = l->p_PRECISION.v_end-l->p_PRECISION.v_start;  //entire vector eta
+	MALLOC(g.ds->mumps_irhs_loc, int, rhs_len);
+	MALLOC(g.ds->mumps_rhs_loc, complex_PRECISION, rhs_len);
+	memset(g.ds->mumps_rhs_loc, 0, rhs_len * sizeof(complex_PRECISION));
+	memset(g.ds->mumps_irhs_loc, 0, rhs_len * sizeof(int));
+    }
+#endif
+  /*  	MPI_Barrier(MPI_COMM_WORLD);
+	printf0("CHECKPOINT 1\n"); 
+	printf0("N: %ld, nr_nodes: %ld, site_var: %ld\n", mumps_n, nr_nodes, site_var);
+	printf0("size of A1d: %ld complex_floats (%dBytes)\n", mumps_n* nr_nodes* site_var, sizeof(complex_float)); 
+	fflush(stdout);
+*/	
+	
+#ifdef COARSE_SCALAP
+    if (l->idle){   //just use one element (beeing 0) as placeholder. mem. must be allocated for scalapack
+	MALLOC( g.ds->dense_vals, complex_float, 1 );
+	memset( g.ds->dense_vals, 0, 1 * sizeof(complex_float));
+	
+	MALLOC( g.ds->desc_dense_vals, lapack_int, 9);
+	memset( g.ds->desc_dense_vals, 0,  9 * sizeof(lapack_int));
+	
+	MALLOC( g.ds->desc_rhs, lapack_int, 9);
+	memset( g.ds->desc_rhs, 0,  9 * sizeof(lapack_int));
+    } else {
+	MALLOC( g.ds->desc_dense_vals, lapack_int, 9);
+	memset( g.ds->desc_dense_vals, 0,  9 * sizeof(lapack_int));
+
+	MALLOC( g.ds->desc_rhs, lapack_int, 9);
+	memset( g.ds->desc_rhs, 0,  9 * sizeof(lapack_int));
+
+	MALLOC( g.ds->dense_vals, complex_float, mumps_n * nr_nodes * site_var);
+	memset( g.ds->dense_vals, 0, mumps_n * nr_nodes * site_var * sizeof(complex_float));
+    }
+    		//TODO:
+		//move the follwing lines in a similar if-clause as above. 
+		//how to check whether Process_i is part of the 2d-P-Grid? 
+		//for now: All processes allocate mem and could participate in computation
+ /*	MPI_Barrier(MPI_COMM_WORLD);
+	printf0("CHECKPOINT 2\n"); 
+	printf0("pcol2d: %d, prow2d: %d, num_procs: %d\n", g.pcol2d, g.prow2d, g.num_processes);
+	printf0("size of A2d: %ld complex_floats (%dBytes)\n", mumps_n * nr_nodes * site_var /(g.pcol2d * g.prow2d) * g.num_processes, sizeof(complex_float)); 
+	fflush(stdout);
+*/	
+    MALLOC( g.ds->dense_vals2d, complex_float, mumps_n * nr_nodes * site_var /(g.pcol2d * g.prow2d) * g.num_processes);
+    memset( g.ds->dense_vals2d, 0, mumps_n * nr_nodes * site_var /(g.pcol2d * g.prow2d) * g.num_processes * sizeof(complex_float));
+ 
+    MALLOC( g.ds->rhs2d, complex_float, l->inner_vector_size * g.pcol2d);
+    memset( g.ds->rhs2d, 0, l->inner_vector_size * g.pcol2d * sizeof(complex_float));
+    
+    MALLOC( g.ds->desc_dense_vals2d, lapack_int, 9);
+    memset( g.ds->desc_dense_vals2d, 0,  9 * sizeof(lapack_int));
+    
+    MALLOC( g.ds->desc_rhs2d, lapack_int, 9);
+    memset( g.ds->desc_rhs2d, 0,  9 * sizeof(lapack_int));
+
+    MALLOC( g.ds->ipiv, lapack_int, mumps_n + 1);
+    memset( g.ds->ipiv, 0, (mumps_n +1)*sizeof(lapack_int));
+//    for (int i = 0; i < mumps_n +1; i++) p->ipiv[i] = i;
+
+    g.ds->blacs_ctxt1d = 0;
+    g.ds->blacs_ctxt2d = 0;
+    g.ds->myrow = -1;
+    g.ds->myrow2d = -1;
+#endif
+
+/*    	MPI_Barrier(MPI_COMM_WORLD);
+	printf0("CHECKPOINT 3\n"); fflush(stdout);
+*/	
+}
+
+void direct_solver_PRECISION_free(level_struct *lx){
+//free memory of direct solver on coarsest level
+  level_struct *l = lx; //get l as the coarsest level
+  for (int i = 1; i<g.num_levels; i++) {
+    l = l->next_level;
+  }
+ 
+  // free cmumps instance
+  if (l->level == 0){
+#ifdef MUMPS_ADDS
+      if (!l->idle){
+          g.mumps_id.job = JOB_END;
+	  cmumps_c(&(g.mumps_id));
+      }
+      int site_var = l->num_lattice_site_var;
+      int nr_nodes = l->num_inner_lattice_sites;
+
+      if (!l->idle){
+	  FREE( g.ds->mumps_vals,complex_PRECISION,SQUARE(site_var)*nr_nodes *9 );
+	  FREE( g.ds->mumps_Is,int,SQUARE(site_var)*nr_nodes *9);
+	  FREE( g.ds->mumps_Js,int,SQUARE(site_var)*nr_nodes *9);
+	  //in case of odd even -> use 2*(v_end - v_start)? 
+	  FREE( g.ds->mumps_irhs_loc, int, l->p_PRECISION.v_end-l->p_PRECISION.v_start);
+	  FREE( g.ds->mumps_rhs_loc, complex_PRECISION, l->p_PRECISION.v_end-l->p_PRECISION.v_start);
+	  if (g.my_rank == 0) FREE( g.ds->mumps_SOL, complex_PRECISION, site_var * nr_nodes * l->num_processes);	//order of Matrix
+      }
+#endif
+#ifdef COARSE_SCALAP
+      if (!l->idle){
+	  FREE( g.ds->dense_vals, complex_PRECISION, l->num_inner_lattice_sites * l->num_processes * l->num_lattice_site_var   
+						    * l->num_inner_lattice_sites *l->num_lattice_site_var);
+	  FREE( g.ds->desc_dense_vals, int, 9);
+	  FREE( g.ds->desc_rhs, int, 9);    
+      }
+      FREE( g.ds->dense_vals2d, complex_PRECISION, l->num_inner_lattice_sites * l->num_processes * l->num_lattice_site_var   
+						* l->num_inner_lattice_sites *l->num_lattice_site_var/(g.pcol2d * g.prow2d) * g.num_processes);
+
+      FREE( g.ds->rhs2d, complex_PRECISION, l->inner_vector_size * g.pcol2d);
+
+      FREE( g.ds->desc_dense_vals2d, int, 9);
+      FREE( g.ds->desc_rhs2d, int, 9);    
+      FREE( g.ds->ipiv, int, l->num_inner_lattice_sites * l->num_processes * l->num_lattice_site_var +1);
+
+      
+      blacs_gridexit_( &(g.ds->blacs_ctxt1d));
+      blacs_gridexit_( &(g.ds->blacs_ctxt2d));
+#endif
+  }
+}
+#endif

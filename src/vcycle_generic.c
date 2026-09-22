@@ -1,0 +1,279 @@
+/*
+ * Copyright (C) 2016, Matthias Rottmann, Artur Strebel, Simon Heybrock, Simone Bacchio, Bjoern Leder.
+ * 
+ * This file is part of the DDalphaAMG solver library.
+ * 
+ * The DDalphaAMG solver library is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ * 
+ * The DDalphaAMG solver library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with the DDalphaAMG solver library. If not, see http://www.gnu.org/licenses/.
+ * 
+ */
+
+#include "main.h"
+#include "vcycle_PRECISION.h"
+
+void smoother_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRECISION eta,
+                         int n, const int res, level_struct *l, struct Thread *threading ) {
+  
+  ASSERT( phi != eta );
+
+  START_MASTER(threading);
+  PROF_PRECISION_START( _SM );
+  END_MASTER(threading);
+  
+  if ( g.method == 1 ) {
+    additive_schwarz_PRECISION( phi, Dphi, eta, n, res, &(l->s_PRECISION), l, threading );
+  } else if ( g.method == 2 ) {
+    red_black_schwarz_PRECISION( phi, Dphi, eta, n, res, &(l->s_PRECISION), l, threading );
+  } else if ( g.method == 3 ) {
+    sixteen_color_schwarz_PRECISION( phi, Dphi, eta, n, res, &(l->s_PRECISION), l, threading );
+  } else {
+    int start = threading->start_index[l->depth];
+    int end   = threading->end_index[l->depth];
+    START_LOCKED_MASTER(threading)
+    l->sp_PRECISION.initial_guess_zero = res;
+    l->sp_PRECISION.num_restart = n;
+    END_LOCKED_MASTER(threading)
+    if ( g.method == 4 || g.method == 6 ) {
+      if ( g.odd_even ) {
+        if ( res == _RES ) {
+          apply_operator_PRECISION( l->sp_PRECISION.x, phi, &(l->p_PRECISION), l, threading );
+          vector_PRECISION_minus( l->sp_PRECISION.x, eta, l->sp_PRECISION.x, start, end, l );
+        }
+        block_to_oddeven_PRECISION( l->sp_PRECISION.b, res==_RES?l->sp_PRECISION.x:eta, l, threading );
+        START_LOCKED_MASTER(threading)
+        l->sp_PRECISION.initial_guess_zero = _NO_RES;
+        END_LOCKED_MASTER(threading)
+        if ( g.method == 6 ) {
+          if ( l->depth == 0 ) g5D_solve_oddeven_PRECISION( &(l->sp_PRECISION), &(l->oe_op_PRECISION), l, threading );
+          else g5D_coarse_solve_odd_even_PRECISION( &(l->sp_PRECISION), &(l->oe_op_PRECISION), l, threading );
+        } else {
+          if ( l->depth == 0 ) solve_oddeven_PRECISION( &(l->sp_PRECISION), &(l->oe_op_PRECISION), l, threading );
+          else coarse_solve_odd_even_PRECISION( &(l->sp_PRECISION), &(l->oe_op_PRECISION), l, threading );
+        }
+        if ( res == _NO_RES ) {
+          oddeven_to_block_PRECISION( phi, l->sp_PRECISION.x, l, threading );
+        } else {
+          oddeven_to_block_PRECISION( l->sp_PRECISION.b, l->sp_PRECISION.x, l, threading );
+          vector_PRECISION_plus( phi, phi, l->sp_PRECISION.b, start, end, l );
+        }
+      } else {
+        START_LOCKED_MASTER(threading)
+        l->sp_PRECISION.x = phi; l->sp_PRECISION.b = eta;
+        END_LOCKED_MASTER(threading)
+        fgmres_PRECISION( &(l->sp_PRECISION), l, threading );
+      }
+    } else if ( g.method == 5 ) {
+      vector_PRECISION_copy( l->sp_PRECISION.b, eta, start, end, l );
+      bicgstab_PRECISION( &(l->sp_PRECISION), l, threading );
+      vector_PRECISION_copy( phi, l->sp_PRECISION.x, start, end, l );
+    }
+    ASSERT( Dphi == NULL );
+  }
+  
+  START_MASTER(threading);
+  PROF_PRECISION_STOP( _SM, n );
+  END_MASTER(threading);
+}
+
+
+void vcycle_PRECISION( vector_PRECISION phi, vector_PRECISION Dphi, vector_PRECISION eta,
+                       int res, level_struct *l, struct Thread *threading ) {
+/*
+    MPI_Barrier(MPI_COMM_WORLD);
+    printf("r: %d, level: %d\n", g.my_rank, l->level); fflush(stdout);
+    printf0("CHECKPOINT1\n"); fflush(stdout);
+    MPI_Barrier(MPI_COMM_WORLD);
+*/
+    if ( g.interpolation && l->level>0 ) {
+	for ( int i=0; i<l->n_cy; i++ ) {
+	    //printf0("R: %d, iteration: %d, level: %d\n", g.my_rank, i, l->level); fflush(stdout);
+	    //MPI_Barrier(MPI_COMM_WORLD);
+	    if ( i==0 && res == _NO_RES ) {
+		if (!l->idle){
+		    restrict_PRECISION( l->next_level->p_PRECISION.b, eta, l, threading );
+		}
+	    } else {
+		if (!l->idle){
+		    int start = threading->start_index[l->depth];
+		    int end   = threading->end_index[l->depth];
+		    apply_operator_PRECISION( l->vbuf_PRECISION[2], phi, &(l->p_PRECISION), l, threading );
+		    vector_PRECISION_minus( l->vbuf_PRECISION[3], eta, l->vbuf_PRECISION[2], start, end, l );
+		    restrict_PRECISION( l->next_level->p_PRECISION.b, l->vbuf_PRECISION[3], l, threading );
+		}
+	    }
+	    //if ( !l->next_level->idle ) {
+	    if ( !l->next_level->idle ) {
+		START_MASTER(threading)
+		if ( l->depth == 0 )
+		    g.coarse_time -= MPI_Wtime();
+		END_MASTER(threading)
+	    }
+	    if ( l->level > 1 ) {
+		if ( g.kcycle ) {
+		    if ( g.wcycle==1 ) {
+			vcycle_PRECISION( l->next_level->p_PRECISION.x, NULL, l->next_level->p_PRECISION.b, _NO_RES, l->next_level, threading );
+		    } else {
+			if ( !l->next_level->idle ) {
+			    fgmres_PRECISION( &(l->next_level->p_PRECISION), l->next_level, threading );
+			}
+		    }
+		} else {
+		    vcycle_PRECISION( l->next_level->p_PRECISION.x, NULL, l->next_level->p_PRECISION.b, _NO_RES, l->next_level, threading );
+		}
+	    } else {
+		if ( g.odd_even ) {
+		    if ( g.method == 6 ) {
+			if ( !l->next_level->idle ) {
+			    g5D_coarse_solve_odd_even_PRECISION( &(l->next_level->p_PRECISION), &(l->next_level->oe_op_PRECISION), l->next_level, threading );
+			}
+		    } else {
+			if ( !l->next_level->idle ) {
+			    START_MASTER(threading)
+			    g.coarsest_time -= MPI_Wtime();
+			    END_MASTER(threading)
+			}
+#if defined(MUMPS_ADDS) || defined(COARSE_SCALAP)
+			int fgmres_iters = 0;
+			// solve: Ax = b using 
+			// x = l->next_level->p_PRECISION->x, 
+			// A = l->next_level->oe_op_PRECISION, 
+			// b = l->next_level->p_PRECISION->b
+			if (g.on_solve){
+#if defined(COARSE_SCALAP)
+			    coarse_scalap_solve_PRECISION(
+				  l->next_level->p_PRECISION.x, NULL, 
+				  l->next_level->p_PRECISION.b, _NO_RES, 
+				  l->next_level, no_threading);  
+#elif defined(MUMPS_ADDS)
+			    fgmres_iters = fgmres_PRECISION( &(l->next_level->p_PRECISION), l->next_level, threading );
+#endif
+			} else {
+#endif
+
+			    if ( !l->next_level->idle ) {
+#ifdef GCRODR	
+//				printf0("CHECKPOINT GCRODR1\n"); fflush(stdout);
+//				MPI_Barrier(l->next_level->gs_PRECISION.level_comm);
+				// NOTE : something that shouldn't be happening here happens, namely the RHS is changed
+				//        by the function coarse_solve_odd_even_PRECISION(...). So, we back it up and restore
+				//        it as necessary
+
+				int start,end;
+				compute_core_start_end( l->next_level->p_PRECISION.v_start, l->next_level->p_PRECISION.v_end, &start, &end, l->next_level, threading );
+				vector_PRECISION_copy( l->next_level->p_PRECISION.rhs_bk, l->next_level->p_PRECISION.b, start, end, l->next_level );
+
+				START_MASTER(threading)
+				l->next_level->p_PRECISION.was_there_stagnation = 0;
+				END_MASTER(threading)
+				SYNC_MASTER_TO_ALL(threading)
+
+				while( 1 ) {
+				    //if ( g.my_rank == 0 ) printf("*********** p->gcrodr_PRECISION.k = %d\n", l->next_level->p_PRECISION.gcrodr_PRECISION.k);
+				    coarse_solve_odd_even_PRECISION( &(l->next_level->p_PRECISION), &(l->next_level->oe_op_PRECISION), l->next_level, threading );
+				    if ( l->next_level->p_PRECISION.was_there_stagnation==0 ) { break; }
+				    else if ( l->next_level->p_PRECISION.was_there_stagnation==1 && l->next_level->p_PRECISION.gcrodr_PRECISION.CU_usable==1 ) {
+					// in case there was stagnation, we need to rebuild the coarsest-level data
+					double time_bk = g.coarsest_time;
+					coarsest_level_resets_PRECISION( l->next_level, threading );
+					START_MASTER(threading)
+					l->next_level->p_PRECISION.was_there_stagnation = 0;
+					g.coarsest_time = time_bk;
+					END_MASTER(threading)
+					SYNC_MASTER_TO_ALL(threading)
+					vector_PRECISION_copy( l->next_level->p_PRECISION.b, l->next_level->p_PRECISION.rhs_bk, start, end, l->next_level );
+				    } else {
+				    // in this case, there was stagnation but no deflation/recycling subspace is being used
+					break;
+				    }
+				}
+//				printf0("CHECKPOINT GCRODR2\n"); fflush(stdout);
+//				MPI_Barrier(l->next_level->gs_PRECISION.level_comm);
+
+#else
+				coarse_solve_odd_even_PRECISION( &(l->next_level->p_PRECISION), &(l->next_level->oe_op_PRECISION), l->next_level, threading );
+#endif
+			    }
+#if defined(MUMPS_ADDS) || defined(COARSE_SCALAP)
+			}	//if on_solve
+#endif
+
+			if ( !l->next_level->idle ) {
+			    START_MASTER(threading)
+			    g.coarsest_time += MPI_Wtime();
+
+#if defined(MUMPS_ADDS) || defined(COARSE_SCALAP)
+			    if (g.on_solve) printf0("gmres iters = %d\n", fgmres_iters);
+#endif
+			    END_MASTER(threading)
+			}
+
+		    }
+		} else {
+		    if ( !l->next_level->idle ) {
+			START_MASTER(threading)
+			g.coarsest_time -= MPI_Wtime();
+			END_MASTER(threading)
+
+#if defined(MUMPS_ADDS) || defined(COARSE_SCALAP)
+			printf0("PLEASE MAKE SURE THAT ODD_EVEN_PRECONDITIONING IS ENABLED.\n");
+			fflush(stdout);
+			MPI_Barrier(l->gs_PRECISION.level_comm);
+			exit(1);
+
+			if (!g.on_solve){
+			    l->next_level->p_PRECISION.preconditioner = NULL;
+			}
+#endif
+			int fgmres_iters = fgmres_PRECISION( &(l->next_level->p_PRECISION), l->next_level, threading );
+#if defined(MUMPS_ADDS)
+			if (!g.on_solve){
+			    l->next_level->p_PRECISION.preconditioner = mumps_solve_PRECISION;
+			}
+#elif defined(COARSE_SCALAP)
+			if (!g.on_solve){
+			    l->next_level->p_PRECISION.preconditioner = coarse_scalap_solve_PRECISION;
+			}
+#endif
+			START_MASTER(threading)
+			g.coarsest_time += MPI_Wtime();
+			END_MASTER(threading)
+			START_MASTER(threading)
+			printf0("gmres iters = %d\n", fgmres_iters);
+			END_MASTER(threading)
+		    }
+		}
+	    }
+
+	    if ( !l->next_level->idle ) {
+		START_MASTER(threading)
+		if ( l->depth == 0 )
+		    g.coarse_time += MPI_Wtime();
+		END_MASTER(threading)
+	    }
+	    //}	former !l->next_level.idle
+
+	    if (!l->idle) {
+		if( i == 0 && res == _NO_RES )
+		    interpolate3_PRECISION( phi, l->next_level->p_PRECISION.x, l, threading );
+		else
+		    interpolate_PRECISION( phi, l->next_level->p_PRECISION.x, l, threading );
+		smoother_PRECISION( phi, Dphi, eta, l->post_smooth_iter, _RES, l, threading );
+		res = _RES;
+	    }
+	}
+    } else {
+	if (!l->idle)
+	    smoother_PRECISION( phi, Dphi, eta, (l->depth==0)?l->n_cy:l->post_smooth_iter, res, l, threading );
+    }
+}
