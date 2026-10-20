@@ -1,3 +1,5 @@
+-include MakeSettings_CASTNER.mk
+
 # --- COMPILER ----------------------------------------
 #CC = mpiicc 
 CC = cc
@@ -12,6 +14,7 @@ CFLAGS = $(CFLAGS_gnu) -Wno-error=incompatible-pointer-types
 CPP = cpp
 MAKEDEP = $(CPP) -MM
 SRCDIR = src
+CUDA_SRCDIR = src/gpu
 BUILDDIR = build
 BINDIR=bin
 LIBDIR=lib
@@ -20,6 +23,7 @@ TSTDIR=tests
 DOCDIR=doc
 GSRCDIR = $(BUILDDIR)/gsrc
 SRC = $(patsubst $(SRCDIR)/%,%,$(filter-out %_generic.c,$(wildcard $(SRCDIR)/*.c)))
+CUDA_SRC = $(patsubst $(CUDA_SRCDIR)/%,%,$(wildcard $(CUDA_SRCDIR)/*.cu))
 TSTS = $(patsubst %.c,%,$(wildcard $(TSTDIR)/*.c))
 LIB =  $(LIBDIR)/libDDalphaAMG.a $(LIBDIR)/libDDalphaAMG_devel.a $(INCDIR)/DDalphaAMG.h
 SRCGEN = $(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/*_generic.c))
@@ -32,6 +36,14 @@ GHEAFLT = $(patsubst %_generic.h,$(GSRCDIR)/%_float.h,$(HEAGEN))
 GHEADBL = $(patsubst %_generic.h,$(GSRCDIR)/%_double.h,$(HEAGEN))
 GHEA = $(patsubst %,$(GSRCDIR)/%,$(HEA)) $(GHEAFLT) $(GHEADBL)
 OBJ = $(patsubst $(GSRCDIR)/%.c,$(BUILDDIR)/%.o,$(GSRC))
+
+USE_CUDA ?= 0
+ifneq ($(USE_CUDA),0)
+ OBJ += $(patsubst %.cu,$(BUILDDIR)/%.o,$(CUDA_SRC))
+ CFLAGS += -D__USE_CUDA
+ $(info $(CUDA_SRC) $(OBJ))
+endif
+
 OBJDB = $(patsubst %.o,%_devel.o,$(OBJ))
 DEP = $(patsubst %.c,%.dep,$(GSRC))
 
@@ -131,6 +143,9 @@ $(INCDIR)/%: $(SRCDIR)/%
 $(BUILDDIR)/%.o: $(GSRCDIR)/%.c $(SRCDIR)/*.h
 	$(CC) $(OPT_VERSION_FLAGS) $(LAPACKE_INCLUDE) -c $< -o $@
 
+$(BUILDDIR)/%.o: $(GSRCDIR)/cuda/%.cu $(CUDA_SRCDIR)/*.h
+	nvcc $(OPT_VERSION_FLAGS) $(LAPACKE_INCLUDE) -c $< -o $@
+
 $(BUILDDIR)/%_devel.o: $(GSRCDIR)/%.c $(SRCDIR)/*.h
 	$(CC) -g $(DEVEL_VERSION_FLAGS) $(LAPACKE_INCLUDE) -c $< -o $@
 
@@ -144,6 +159,10 @@ $(GSRCDIR)/%_double.h: $(SRCDIR)/%_generic.h $(firstword $(MAKEFILE_LIST))
 	sed -f double.sed $< > $@
 
 $(GSRCDIR)/%.c: $(SRCDIR)/%.c $(firstword $(MAKEFILE_LIST))
+	cp $< $@
+
+$(GSRCDIR)/cuda/%.cu: $(CUDA_SRCDIR)/%.cu $(firstword $(MAKEFILE_LIST))
+	echo "mario2"
 	cp $< $@
 
 $(GSRCDIR)/%_float.c: $(SRCDIR)/%_generic.c $(firstword $(MAKEFILE_LIST))
@@ -163,7 +182,7 @@ copy: $(BINDIR) $(LIBDIR) $(INCDIR)
 
 clean:
 	rm -f $(BUILDDIR)/*.o
-	rm -f $(GSRCDIR)/*
+	rm -f $(GSRCDIR)/*.*
 
 cleanall: clean
 	rm -f $(BINDIR)/*
