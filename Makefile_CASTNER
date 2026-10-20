@@ -162,7 +162,6 @@ $(GSRCDIR)/%.c: $(SRCDIR)/%.c $(firstword $(MAKEFILE_LIST))
 	cp $< $@
 
 $(GSRCDIR)/cuda/%.cu: $(CUDA_SRCDIR)/%.cu $(firstword $(MAKEFILE_LIST))
-	echo "mario2"
 	cp $< $@
 
 $(GSRCDIR)/%_float.c: $(SRCDIR)/%_generic.c $(firstword $(MAKEFILE_LIST))
