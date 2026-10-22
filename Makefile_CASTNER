@@ -1,20 +1,21 @@
 -include MakeSettings_CASTNER.mk
 
 # --- COMPILER ----------------------------------------
-#CC = mpiicc 
+#CC = mpicc 
 CC = cc
 
 # --- CFLAGS -----------------------------------------
-CFLAGS_gnu = -std=gnu99 -Wall -pedantic -O3 -ffast-math -fopenmp
+CFLAGS_all = -Wall -pedantic -O3 -ffast-math -fopenmp
+CFLAGS_gnu = -std=gnu99 $(CFLAGS_all)
+CFLAGS = $(CFLAGS_gnu) -Wno-error=incompatible-pointer-types
+CFLAGS_gpu = -O3 -Xcompiler "-Wall -ffast-math -fopenmp"
 #CFLAGS_intel = -std=gnu99 -Wall -pedantic -O3  -xHOST -qopenmp 
 #CFLAGS = $(CFLAGS_intel)
-CFLAGS = $(CFLAGS_gnu) -Wno-error=incompatible-pointer-types
 
 # --- DO NOT CHANGE -----------------------------------
 CPP = cpp
 MAKEDEP = $(CPP) -MM
 SRCDIR = src
-CUDA_SRCDIR = src/gpu
 BUILDDIR = build
 BINDIR=bin
 LIBDIR=lib
@@ -23,7 +24,12 @@ TSTDIR=tests
 DOCDIR=doc
 GSRCDIR = $(BUILDDIR)/gsrc
 SRC = $(patsubst $(SRCDIR)/%,%,$(filter-out %_generic.c,$(wildcard $(SRCDIR)/*.c)))
-CUDA_SRC = $(patsubst $(CUDA_SRCDIR)/%,%,$(wildcard $(CUDA_SRCDIR)/*.cu))
+USE_CUDA ?= 0
+GPU_CC=$(CC)
+ifneq ($(USE_CUDA),0)
+  GPU_CC = nvcc
+  CUDA_SRC = $(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/*.cu))
+endif
 TSTS = $(patsubst %.c,%,$(wildcard $(TSTDIR)/*.c))
 LIB =  $(LIBDIR)/libDDalphaAMG.a $(LIBDIR)/libDDalphaAMG_devel.a $(INCDIR)/DDalphaAMG.h
 SRCGEN = $(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/*_generic.c))
@@ -36,14 +42,16 @@ GHEAFLT = $(patsubst %_generic.h,$(GSRCDIR)/%_float.h,$(HEAGEN))
 GHEADBL = $(patsubst %_generic.h,$(GSRCDIR)/%_double.h,$(HEAGEN))
 GHEA = $(patsubst %,$(GSRCDIR)/%,$(HEA)) $(GHEAFLT) $(GHEADBL)
 OBJ = $(patsubst $(GSRCDIR)/%.c,$(BUILDDIR)/%.o,$(GSRC))
+OBJ += $(BUILDDIR)/gpu_api.o #FOR API
 
-USE_CUDA ?= 0
 ifneq ($(USE_CUDA),0)
  OBJ += $(patsubst %.cu,$(BUILDDIR)/%.o,$(CUDA_SRC))
  CFLAGS += -D__USE_CUDA
+ CFLAGS_gpu += -D__USE_CUDA
  $(info $(CUDA_SRC) $(OBJ))
 endif
 
+OBJ := $(sort $(OBJ))
 OBJDB = $(patsubst %.o,%_devel.o,$(OBJ))
 DEP = $(patsubst %.c,%.dep,$(GSRC))
 
@@ -67,20 +75,23 @@ OPT_VERSION_FLAGS += -DGCRODR
 OPT_VERSION_FLAGS += -DPOLYPREC
 #OPT_VERSION_FLAGS += -DBLOCK_JACOBI -DBJ_DIR_SOLVS #-DPERS_COMMS
 
-DEVEL_VERSION_FLAGS = $(CFLAGS) $(LIMEFLAGS) -DDEBUG -DPARAMOUTPUT -DTRACK_RES -DFGMRES_RESTEST -DPROFILING -DCOARSE_RES -DSCHWARZ_RES -DTESTVECTOR_ANALYSIS -DOPENMP #-DSSE #-DCOARSE_ODDEVEN_FULL
-DEVEL_VERSION_FLAGS += -DGCRODR
-# DEVEL_VERSION_FLAGS += -DSINGLE_ALLREDUCE_ARNOLDI -DPIPELINED_ARNOLDI
-DEVEL_VERSION_FLAGS += -DPOLYPREC
-#DEVEL_VERSION_FLAGS += -DBLOCK_JACOBI -DBJ_DIR_SOLVS #-DPERS_COMMS
+DEVEL_DEFS = -DDEBUG -DPARAMOUTPUT -DTRACK_RES -DFGMRES_RESTEST -DPROFILING -DCOARSE_RES -DSCHWARZ_RES -DTESTVECTOR_ANALYSIS -DOPENMP #-DSSE #-DCOARSE_ODDEVEN_FULL
+DEVEL_DEFS += -DGCRODR
+# DEVEL_DEFS += -DSINGLE_ALLREDUCE_ARNOLDI -DPIPELINED_ARNOLDI
+DEVEL_DEFS += -DPOLYPREC
+#DEVEL_DEFS += -DBLOCK_JACOBI -DBJ_DIR_SOLVS #-DPERS_COMMS
+
+DEVEL_VERSION_FLAGS = $(CFLAGS) $(LIMEFLAGS) $(DEVEL_DEFS)
 
  OPT_VERSION_FLAGS += -DCOARSE_SCALAP
- DEVEL_VERSION_FLAGS += -DCOARSE_SCALAP
+ DEVEL_DEFS += -DCOARSE_SCALAP
 #---------------------------------------------------
 # lapack and scalapack linkages
 
 LAPACK_DIR = /p/project1/mul-tra/leemhuis1/lapack_ILP64
 LAPACKE_DIR = $(LAPACK_DIR)/LAPACKE
 LAPACKE_INCLUDE = -I$(CRAY_LIBSCI_PREFIX_DIR)/include
+MPI_INCLUDE = -I$(CRAY_MPICH_DIR)/include
 BLASLIB      = $(LAPACK_DIR)/librefblas.a
 LAPACKLIB    = $(LAPACK_DIR)/liblapack.a
 LAPACKELIB   = $(LAPACK_DIR)/liblapacke.a
@@ -143,11 +154,14 @@ $(INCDIR)/%: $(SRCDIR)/%
 $(BUILDDIR)/%.o: $(GSRCDIR)/%.c $(SRCDIR)/*.h
 	$(CC) $(OPT_VERSION_FLAGS) $(LAPACKE_INCLUDE) -c $< -o $@
 
-$(BUILDDIR)/%.o: $(GSRCDIR)/cuda/%.cu $(CUDA_SRCDIR)/*.h
-	nvcc $(OPT_VERSION_FLAGS) $(LAPACKE_INCLUDE) -c $< -o $@
+$(BUILDDIR)/%.o: $(GSRCDIR)/%.cu $(SRCDIR)/*.h
+	$(GPU_CC) -O3 $(CFLAGS_gpu) $(MPI_INCLUDE) $(LAPACKE_INCLUDE) -c $< -o $@
 
 $(BUILDDIR)/%_devel.o: $(GSRCDIR)/%.c $(SRCDIR)/*.h
 	$(CC) -g $(DEVEL_VERSION_FLAGS) $(LAPACKE_INCLUDE) -c $< -o $@
+
+$(BUILDDIR)/%_devel.o: $(GSRCDIR)/%.cu $(SRCDIR)/*.h
+	$(GPU_CC) -g $(CFLAGS_gpu) $(LIMEFLAGS) $(DEVEL_DEFS) $(MPI_INCLUDE) $(LAPACKE_INCLUDE) -c $< -o $@
 
 $(GSRCDIR)/%.h: $(SRCDIR)/%.h $(firstword $(MAKEFILE_LIST))
 	cp $< $@
@@ -161,8 +175,13 @@ $(GSRCDIR)/%_double.h: $(SRCDIR)/%_generic.h $(firstword $(MAKEFILE_LIST))
 $(GSRCDIR)/%.c: $(SRCDIR)/%.c $(firstword $(MAKEFILE_LIST))
 	cp $< $@
 
-$(GSRCDIR)/cuda/%.cu: $(CUDA_SRCDIR)/%.cu $(firstword $(MAKEFILE_LIST))
+$(GSRCDIR)/%.cu: $(SRCDIR)/%.cu $(firstword $(MAKEFILE_LIST))
 	cp $< $@
+
+#FOR API
+$(BUILDDIR)/gpu_api.o: $(SRCDIR)/gpu_api.c $(SRCDIR)/*.h
+	$(GPU_CC) -O3 $(CFLAGS_gpu) $(MPI_INCLUDE) $(LAPACKE_INCLUDE) -c $< -o $@
+#END FOR API
 
 $(GSRCDIR)/%_float.c: $(SRCDIR)/%_generic.c $(firstword $(MAKEFILE_LIST))
 	sed -f float.sed $< > $@
