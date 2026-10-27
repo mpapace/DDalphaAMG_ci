@@ -1843,6 +1843,7 @@ void block_diag_oo_inv_PRECISION( vector_PRECISION eta, vector_PRECISION phi, in
     int block_num = start/24/(n1+n2);
 #ifndef OPTIMIZED_SELF_COUPLING_PRECISION
     config_PRECISION clover = s->op.clover_doublet_oo_inv + (start/24-block_num*n1)*288;
+    gpu_LU_perform_fwd_bwd_subs_PRECISION( n2, sizeof(complex_PRECISION), leta, lphi, clover );
     for ( i=0; i<n2; i++ ) {
       LU_perform_fwd_bwd_subs_PRECISION( leta, lphi, clover );
       leta+=24; lphi+=24; clover+=288;
@@ -1870,6 +1871,7 @@ void block_diag_oo_inv_PRECISION( vector_PRECISION eta, vector_PRECISION phi, in
       }
 #else
       config_PRECISION clover = s->op.clover_oo_inv+(start/12-block_num*n1)*72;
+      gpu_LU_perform_fwd_bwd_subs_PRECISION( n2, sizeof(complex_PRECISION), leta, lphi, clover );
       for ( i=0; i<n2; i++ ) {
         LU_perform_fwd_bwd_subs_PRECISION( leta, lphi, clover );
         leta+=12; lphi+=12; clover+=72;

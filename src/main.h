@@ -28,6 +28,10 @@
 #include <math.h>
 #include <time.h>
 #include <stdarg.h>
+#include "gpu_api.h"
+#include "gpu_api_float.h"
+#include "gpu_api_double.h"
+
 
 #ifndef MAIN_HEADER
   #define MAIN_HEADER

@@ -19,11 +19,18 @@
  *
  */
 
-#ifndef CUDA_SCHWARZ_PRECISION_HEADER
-  #define CUDA_SCHWARZ_PRECISION_HEADER
+#ifndef CUDA_SCHWARZ_GENERIC_H
+#define CUDA_SCHWARZ_GENERIC_H
 
 #include <cuda_runtime.h>
+#include <stddef.h>
 
-
+void cuda_red_black_schwarz_PRECISION(
+    const int cycles,
+    const int block_thread_start[8], const int block_thread_end[8],
+    const int res, const int init_res, const int start, const int end,
+    const int method, const int num_blocks, const int *block_list,
+    const size_t elem_bytes,
+    void *Dphi, void *eta, void *r, void *x, void *latest_iter);
 
 #endif

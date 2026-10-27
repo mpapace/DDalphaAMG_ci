@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #endif
 #include <stdio.h>
+#include "gpu_api.h"
 
 void helloCuda(){
 #ifdef __USE_CUDA

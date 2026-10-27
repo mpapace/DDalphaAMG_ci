@@ -20,6 +20,7 @@
  */
  
 #include "main.h"
+#include "gpu_api.h"
 
 extern global_struct g;
 #ifdef HAVE_HDF5

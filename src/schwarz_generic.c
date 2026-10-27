@@ -1643,7 +1643,13 @@ void red_black_schwarz_PRECISION( vector_PRECISION phi, vector_PRECISION D_phi, 
       ghost_update_PRECISION( x, mu, -1, &(s->op.c), l );
     END_LOCKED_MASTER(threading)
   }
-  
+  /*
+  gpu_red_black_schwarz_api_PRECISION(cycles, block_thread_start, block_thread_end,
+                            res, init_res, start, end,
+                            g.method, s->num_blocks, s->block_list,
+                            sizeof(complex_PRECISION),
+                            (void*)Dphi, (void*)eta, (void*)r, (void*)x, (void*)latest_iter);
+*/
   // perform the Schwarz iteration, solve the block systems
   for ( k=0; k<cycles; k++ ) {
     for ( step=0; step<8; step++ ) {

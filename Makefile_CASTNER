@@ -5,7 +5,7 @@
 CC = cc
 
 # --- CFLAGS -----------------------------------------
-CFLAGS_all = -Wall -pedantic -O3 -ffast-math -fopenmp
+CFLAGS_all = -Wall -pedantic -O3 -ffast-math -fopenmp #-dD -E
 CFLAGS_gnu = -std=gnu99 $(CFLAGS_all)
 CFLAGS = $(CFLAGS_gnu) -Wno-error=incompatible-pointer-types
 CFLAGS_gpu = -O3 -Xcompiler "-Wall -ffast-math -fopenmp"
@@ -28,7 +28,13 @@ USE_CUDA ?= 0
 GPU_CC=$(CC)
 ifneq ($(USE_CUDA),0)
   GPU_CC = nvcc
-  CUDA_SRC = $(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/*.cu))
+  CUDA_SRCALL = $(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/*.cu))
+  CUDA_SRCGEN = $(filter %_generic.cu,$(CUDA_SRCALL))
+  CUDA_SRC = $(filter-out %_generic.cu,$(CUDA_SRCALL)) \
+             $(patsubst %_generic.cu,%_float.cu,$(CUDA_SRCGEN)) \
+             $(patsubst %_generic.cu,%_double.cu,$(CUDA_SRCGEN))
+else
+  CFLAGS_gpu = $(CFLAGS) 
 endif
 TSTS = $(patsubst %.c,%,$(wildcard $(TSTDIR)/*.c))
 LIB =  $(LIBDIR)/libDDalphaAMG.a $(LIBDIR)/libDDalphaAMG_devel.a $(INCDIR)/DDalphaAMG.h
@@ -48,6 +54,7 @@ ifneq ($(USE_CUDA),0)
  OBJ += $(patsubst %.cu,$(BUILDDIR)/%.o,$(CUDA_SRC))
  CFLAGS += -D__USE_CUDA
  CFLAGS_gpu += -D__USE_CUDA
+ CUDA_LIBS = -lstdc++
  $(info $(CUDA_SRC) $(OBJ))
 endif
 
@@ -121,7 +128,7 @@ install: copy
 .SECONDARY:
 
 $(BINDIR)/DDalphaAMG : $(OBJ) 
-	$(CC) $(OPT_VERSION_FLAGS) -o $@ $(OBJ) $(H5LIB) $(LIMELIB) $(SCALAPACK_LIBRARIES) $(LAPACK_LIBRARIES) -lm
+	$(CC) $(OPT_VERSION_FLAGS) -o $@ $(OBJ) $(H5LIB) $(LIMELIB) $(SCALAPACK_LIBRARIES) $(LAPACK_LIBRARIES) -lm $(CUDA_LIBS)
 
 DDalphaAMG : $(BINDIR)/DDalphaAMG
 	ln -sf $(BINDIR)/$@ $@
@@ -130,7 +137,7 @@ DDalphaAMG_devel: $(BINDIR)/DDalphaAMG_devel
 	ln -sf $(BINDIR)/$@ $@
 
 $(BINDIR)/DDalphaAMG_devel : $(OBJDB)
-	$(CC) -g $(DEVEL_VERSION_FLAGS) -o $@ $(OBJDB) $(H5LIB) $(LIMELIB) $(SCALAPACK_LIBRARIES) $(LAPACK_LIBRARIES) -lm
+	$(CC) -g $(DEVEL_VERSION_FLAGS) -o $@ $(OBJDB) $(H5LIB) $(LIMELIB) $(SCALAPACK_LIBRARIES) $(LAPACK_LIBRARIES) -lm $(CUDA_LIBS)
 
 $(LIBDIR)/libDDalphaAMG.a: $(OBJ)
 	ar rc $@ $(OBJ)
@@ -143,7 +150,7 @@ $(LIBDIR)/libDDalphaAMG_devel.a: $(OBJDB)
 	ranlib $@
 
 $(TSTDIR)/%: $(LIB) $(TSTDIR)/%.c
-	$(CC) $(CFLAGS) -o $@ $@.c -I$(INCDIR) $(LAPACKE_INCLUDE) -L$(LIBDIR) -lDDalphaAMG $(LIMELIB) $(SCALAPACK_LIBRARIES) $(LAPACK_LIBRARIES) -lm
+	$(CC) $(CFLAGS) -o $@ $@.c -I$(INCDIR) $(LAPACKE_INCLUDE) -L$(LIBDIR) -lDDalphaAMG $(LIMELIB) $(SCALAPACK_LIBRARIES) $(LAPACK_LIBRARIES) -lm $(CUDA_LIBS)
 
 $(DOCDIR)/user_doc.pdf: $(DOCDIR)/user_doc.tex $(DOCDIR)/user_doc.bib
 	( cd $(DOCDIR); pdflatex user_doc; bibtex user_doc; pdflatex user_doc; pdflatex user_doc; )
@@ -175,13 +182,17 @@ $(GSRCDIR)/%_double.h: $(SRCDIR)/%_generic.h $(firstword $(MAKEFILE_LIST))
 $(GSRCDIR)/%.c: $(SRCDIR)/%.c $(firstword $(MAKEFILE_LIST))
 	cp $< $@
 
+$(GSRCDIR)/%_float.cu: $(SRCDIR)/%_generic.cu $(firstword $(MAKEFILE_LIST))
+	sed -f float.sed $< > $@
+
+$(GSRCDIR)/%_double.cu: $(SRCDIR)/%_generic.cu $(firstword $(MAKEFILE_LIST))
+	sed -f double.sed $< > $@
+
 $(GSRCDIR)/%.cu: $(SRCDIR)/%.cu $(firstword $(MAKEFILE_LIST))
 	cp $< $@
 
-#FOR API
-$(BUILDDIR)/gpu_api.o: $(SRCDIR)/gpu_api.c $(SRCDIR)/*.h
+$(BUILDDIR)/gpu_api.o: $(GSRCDIR)/gpu_api.c $(SRCDIR)/*.h $(GHEA)
 	$(GPU_CC) -O3 $(CFLAGS_gpu) $(MPI_INCLUDE) $(LAPACKE_INCLUDE) -c $< -o $@
-#END FOR API
 
 $(GSRCDIR)/%_float.c: $(SRCDIR)/%_generic.c $(firstword $(MAKEFILE_LIST))
 	sed -f float.sed $< > $@
