@@ -265,7 +265,7 @@ void method_setup( vector_double *V, level_struct *l, struct Thread *threading )
       } else {
 	  printf0("no double-precision version for direct solver implemented yet.\n");
 	  fflush(stdout);
-	  if (g.my_rank == 0) exit(0);
+	  MPI_Abort(MPI_COMM_WORLD, 1);   // terminate all ranks, not only rank 0
       }
 #endif
 

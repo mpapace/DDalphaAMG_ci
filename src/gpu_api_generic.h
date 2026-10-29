@@ -9,6 +9,6 @@ void gpu_red_black_schwarz_api_PRECISION(
     const size_t elem_bytes,
     void *Dphi, void *eta, void *r, void *x, void *latest_iter);
 
-void gpu_LU_perform_fwd_bwd_subs_PRECISION(const int n_sites, const size_t elem_bytes,
+int gpu_LU_perform_fwd_bwd_subs_PRECISION(const int n_sites, const int bs, const size_t elem_bytes,
                                            void *leta, void *lphi, void *clover);
 #endif

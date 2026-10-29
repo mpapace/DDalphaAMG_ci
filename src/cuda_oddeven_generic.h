@@ -22,7 +22,7 @@
 #ifndef CUDA_ODDEVEN_GENERIC_H
 #define CUDA_ODDEVEN_GENERIC_H
 
-void cuda_LU_perform_fwd_bwd_subs_PRECISION(const int n_sites, const size_t elem_bytes,
+void cuda_LU_perform_fwd_bwd_subs_PRECISION(const int n_sites, const int bs, const size_t elem_bytes,
                                             void *leta, void *lphi, void *clover);
 
 #endif

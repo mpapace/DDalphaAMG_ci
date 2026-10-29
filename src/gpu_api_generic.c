@@ -24,10 +24,13 @@ void gpu_red_black_schwarz_api_PRECISION(
 #endif
 }
 
-void gpu_LU_perform_fwd_bwd_subs_PRECISION(const int n_sites, const size_t elem_bytes,
+int gpu_LU_perform_fwd_bwd_subs_PRECISION(const int n_sites, const int bs, const size_t elem_bytes,
                                            void *leta, void *lphi, void *clover)
 {
 #ifdef __USE_CUDA
-  cuda_LU_perform_fwd_bwd_subs_PRECISION(n_sites, elem_bytes, leta, lphi, clover);
+  cuda_LU_perform_fwd_bwd_subs_PRECISION(n_sites, bs, elem_bytes, leta, lphi, clover);
+  return 1;   // done on GPU
+#else
+  return 0;   // caller must run the CPU version
 #endif
 }

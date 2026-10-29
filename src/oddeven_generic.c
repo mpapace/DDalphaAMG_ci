@@ -1828,12 +1828,11 @@ void block_diag_oo_PRECISION( vector_PRECISION eta, vector_PRECISION phi,
   END_UNTHREADED_FUNCTION(threading)
 }
 
-// inverted diagonal blocks applied to the odd sites of a block
 void block_diag_oo_inv_PRECISION( vector_PRECISION eta, vector_PRECISION phi, int start, schwarz_PRECISION_struct *s,
                                   level_struct *l, struct Thread *threading ) {
 
   START_UNTHREADED_FUNCTION(threading)
-  
+
   int i, n1 = s->num_block_even_sites, n2 = s->num_block_odd_sites;
 
 #ifdef HAVE_TM1p1
@@ -1843,10 +1842,12 @@ void block_diag_oo_inv_PRECISION( vector_PRECISION eta, vector_PRECISION phi, in
     int block_num = start/24/(n1+n2);
 #ifndef OPTIMIZED_SELF_COUPLING_PRECISION
     config_PRECISION clover = s->op.clover_doublet_oo_inv + (start/24-block_num*n1)*288;
-    gpu_LU_perform_fwd_bwd_subs_PRECISION( n2, sizeof(complex_PRECISION), leta, lphi, clover );
-    for ( i=0; i<n2; i++ ) {
-      LU_perform_fwd_bwd_subs_PRECISION( leta, lphi, clover );
-      leta+=24; lphi+=24; clover+=288;
+    // run on GPU if available, otherwise on CPU
+    if ( !gpu_LU_perform_fwd_bwd_subs_PRECISION( n2, 12, sizeof(complex_PRECISION), leta, lphi, clover ) ) {
+      for ( i=0; i<n2; i++ ) {
+        LU_perform_fwd_bwd_subs_PRECISION( leta, lphi, clover );
+        leta+=24; lphi+=24; clover+=288;
+      }
     }
 #else
     PRECISION *clover_vectorized = s->op.clover_doublet_oo_inv_vectorized + (start/24-block_num*n1)*2*288;
@@ -1871,10 +1872,12 @@ void block_diag_oo_inv_PRECISION( vector_PRECISION eta, vector_PRECISION phi, in
       }
 #else
       config_PRECISION clover = s->op.clover_oo_inv+(start/12-block_num*n1)*72;
-      gpu_LU_perform_fwd_bwd_subs_PRECISION( n2, sizeof(complex_PRECISION), leta, lphi, clover );
-      for ( i=0; i<n2; i++ ) {
-        LU_perform_fwd_bwd_subs_PRECISION( leta, lphi, clover );
-        leta+=12; lphi+=12; clover+=72;
+      // run on GPU if available, otherwise on CPU
+      if ( !gpu_LU_perform_fwd_bwd_subs_PRECISION( n2, 6, sizeof(complex_PRECISION), leta, lphi, clover ) ) {
+        for ( i=0; i<n2; i++ ) {
+          LU_perform_fwd_bwd_subs_PRECISION( leta, lphi, clover );
+          leta+=12; lphi+=12; clover+=72;
+        }
       }
 #endif
 #else
@@ -1882,7 +1885,7 @@ void block_diag_oo_inv_PRECISION( vector_PRECISION eta, vector_PRECISION phi, in
       for ( i=0; i<n2; i++ ) {
         sse_site_clover_PRECISION( (PRECISION*)leta, (PRECISION*)lphi, clover_vectorized );
         leta+=12; lphi+=12; clover_vectorized+=144;
-      }      
+      }
 #endif
     } else {
       config_PRECISION clover = s->op.clover+n1*12+start;
@@ -1898,7 +1901,7 @@ void block_diag_oo_inv_PRECISION( vector_PRECISION eta, vector_PRECISION phi, in
 #ifdef HAVE_TM1p1
   }
 #endif
-  
+
   END_UNTHREADED_FUNCTION(threading)
 }
 
