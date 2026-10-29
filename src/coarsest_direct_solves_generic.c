@@ -42,7 +42,7 @@ void pgetrf_PRECISION(const lapack_int*, const lapack_int*, complex_PRECISION*, 
 void pgetrs_PRECISION(const char*, const lapack_int*, const lapack_int*, const complex_PRECISION*, const lapack_int*, const lapack_int*, const lapack_int*, const lapack_int*, complex_PRECISION*, const lapack_int*, const lapack_int*, const lapack_int*, lapack_int* );
 //		 void(const char *, const int *, const int *, const _Complex float *, const int *, const int *, const int *, const int *, _Complex float *, const int *, const int *, const int *, int *)
 void pgetri_PRECISION( const lapack_int*, complex_PRECISION*, const lapack_int*, const lapack_int*, lapack_int*, lapack_int*, complex PRECISION*, const lapack_int*, const lapack_int*, lapack_int*, lapack_int* );
-void pgemv_PRECISION(char*, lapack_int*, lapack_int*, PRECISION*, complex_PRECISION*, lapack_int*, lapack_int*, lapack_int*, complex_PRECISION*, lapack_int*, lapack_int*, lapack_int*, lapack_int*, PRECISION*, complex_PRECISION*, lapack_int*, lapack_int*, lapack_int*, lapack_int*);
+void pgemv_PRECISION(char*, lapack_int*, lapack_int*, complex_PRECISION*, complex_PRECISION*, lapack_int*, lapack_int*, lapack_int*, complex_PRECISION*, lapack_int*, lapack_int*, lapack_int*, lapack_int*, complex_PRECISION*, complex_PRECISION*, lapack_int*, lapack_int*, lapack_int*, lapack_int*);
 void pgemr2d_PRECISION( const lapack_int*, const lapack_int*, complex_PRECISION*, const lapack_int*, const lapack_int*, const lapack_int*, complex_PRECISION*, const lapack_int*, const lapack_int*, const lapack_int*, lapack_int*);
 
 void paxpy_PRECISION( const lapack_int*, complex_PRECISION*, complex_PRECISION*, const lapack_int*, const lapack_int*, const lapack_int*, const lapack_int*, complex_PRECISION*, const lapack_int*, const lapack_int*, const lapack_int*, const lapack_int*);
@@ -760,7 +760,7 @@ void coarse_scalap_solve_PRECISION(vector_PRECISION phi, vector_PRECISION Dphi,
 
 	lapack_int N = l->num_processes * l->num_inner_lattice_sites * l->num_lattice_site_var;
 
-	PRECISION alpha = 1.0, beta = 0.0;
+	complex_PRECISION alpha = 1.0, beta = 0.0;  // p?gemv expects complex alpha/beta
 
 
 	//rhs2d = eta

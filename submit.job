@@ -1,0 +1,21 @@
+#!/bin/bash
+#SBATCH --job-name=test-CASTNER
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --cpus-per-task=36
+#SBATCH --gpus-per-node=4
+#SBATCH --output=result-test
+#SBATCH --error=err_file
+#SBATCH --time=00:10:00
+#SBATCH --partition=blancapeak
+##SBATCH --account=...
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=mariopapacee@gmail.com
+
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}   # or 1 for the tests
+export SRUN_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK}
+export SRUN_EXPORT_ENV=ALL
+
+cd $SLURM_SUBMIT_DIR
+./run_CASTNER -i sample_devel.ini
+date
